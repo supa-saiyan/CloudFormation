@@ -1,0 +1,158 @@
+---
+
+Parameters:
+  CidrValue: 
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    Description: VPC CIDR Range
+ 
+  PublicS:
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    Description: VPC public subnet
+ 
+  PrivateS:
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    Description: VPC private subnet
+
+  Key: 
+    Type: AWS::EC2::KeyPair::KeyName
+  
+  InstanceType: 
+    Description: WebServer EC2 instances
+    Type: String
+    Default: t2.small
+    AllowedValues:
+      - t1.micro
+      - t2.nano
+      - t2.micro
+      - t2.small 
+
+  SSHLocation:
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: must be a valid IP CIDR range of the from x.x.x.x/x.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Network Configuration" 
+        Parameters:   
+          - CidrValue
+          - PublicS
+          - PrivateS
+      - Label:
+          default: "Amazon EC2 Configuration"
+        Parameters:  
+          - Key
+          - InstanceType
+          - SSHLocation
+
+Resources: 
+  VPCStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+       TemplateURL: https://cloudformation-bucket-nested-mycorp.s3.amazonaws.com/vpc.yaml
+       Parameters:  
+         CidrValue: !Ref CidrValue
+         PublicS: !Ref PublicS
+         PrivateS: !Ref PrivateS
+       TimeoutInMinutes: 7
+
+  Ec2InstancePublic: 
+     Type: AWS::EC2::Instance
+     Properties: 
+       ImageId: ami-0a887e401f7654935
+       SubnetId: !GetAtt VPCStack.Outputs.PublicSubnetID
+       InstanceType: !Ref InstanceType
+       KeyName: !Ref Key
+       SecurityGroupIds: 
+         - !Ref SSHSecurityGroup
+       UserData:
+        Fn::Base64: | 
+           #!/bin/bash
+           yum update -y
+           yum install -y httpd
+           echo "Hello world" > /var/www/html/index.html
+           systemctl start httpd
+           systemctl enable httpd
+
+  ElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      Subnets: 
+        - !GetAtt VPCStack.Outputs.PublicSubnetID
+      SecurityGroups: 
+        - !Ref SSHSecurityGroup
+#      AvailabilityZones: !Select 
+#        - '1' 
+#        - !GetAZs
+#          Ref: 'AWS::Region'
+      Instances:
+      - !Ref Ec2InstancePublic
+      Listeners:
+      - LoadBalancerPort: '80'
+        InstancePort: '80'
+        Protocol: HTTP
+      HealthCheck:
+        Target: HTTP:80/
+        HealthyThreshold: '3'
+        UnhealthyThreshold: '5'
+        Interval: '30'
+        Timeout: '5'
+
+  SSHSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH access via port 22
+      VpcId: !GetAtt VPCStack.Outputs.vpcid
+      SecurityGroupIngress:
+      - CidrIp: !Ref SSHLocation
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      - CidrIp: 0.0.0.0/0
+        FromPort: 80
+        IpProtocol: tcp
+        ToPort: 80
+
+  Volume01:
+   Type: AWS::EC2::Volume
+   Properties: 
+     AvailabilityZone: !Select 
+       - '1' 
+       - !GetAZs
+         Ref: 'AWS::Region'
+     Iops: 100
+     VolumeType: io1
+     Size: 10
+
+  Attach:
+    Type: AWS::EC2::VolumeAttachment
+    Properties: 
+      Device: /dev/sda2
+      InstanceId: !Ref Ec2InstancePublic
+      VolumeId: !Ref Volume01
+
+ 
+Outputs: 
+  Link:
+    Description: Output of link
+    Value: !Sub 'http://${Ec2InstancePublic.PublicDnsName}'
+    Export: 
+      Name: link
